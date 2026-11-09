@@ -23,12 +23,14 @@ BRIGHT_RED=$'\033[91m'
 BRIGHT_YELLOW=$'\033[93m'
 BRIGHT_MAGENTA=$'\033[95m'
 
-APP_NAME="LAPIO BHAI"
-APP_VERSION="2.6"
-LOG_DIR="${HOME}/.lapio-bhai"
+APP_NAME="ZAPPY MODS"
+APP_VERSION="3.0"
+LOG_DIR="${HOME}/.zappy-mods"
 LOG_FILE="${LOG_DIR}/installer.log"
-VPS_DIR="${HOME}/.lapio-bhai/vps"
+VPS_DIR="${LOG_DIR}/vps"
 VPS_ENV="${VPS_DIR}/.vps_env"
+CF_PID_FILE="${LOG_DIR}/cloudflared.pid"
+CF_LOG_FILE="${LOG_DIR}/cloudflared.log"
 
 mkdir -p "$LOG_DIR" "$VPS_DIR"
 touch "$LOG_FILE"
@@ -47,14 +49,6 @@ run_priv() {
     else
         "$@"
     fi
-}
-
-term_width() {
-    local width
-    width="$(tput cols 2>/dev/null || true)"
-    [[ "$width" =~ ^[0-9]+$ ]] || width=80
-    (( width < 70 )) && width=70
-    printf '%s\n' "$width"
 }
 
 line() {
@@ -214,7 +208,7 @@ header() {
     clear 2>/dev/null || printf '\033c'
     echo
     echo -e "  ${BRIGHT_CYAN}${BOLD}╭────────────────────────────────────────────────────────────╮${RESET}"
-    echo -e "  ${BRIGHT_CYAN}${BOLD}│${RESET}  ${BRIGHT_MAGENTA}${BOLD}LAPIO BHAI${RESET}  ${DIM}•${RESET}  ${BRIGHT_WHITE}SERVER INSTALLER${RESET}  ${DIM}v${APP_VERSION}${RESET}       ${BRIGHT_CYAN}${BOLD}│${RESET}"
+    echo -e "  ${BRIGHT_CYAN}${BOLD}│${RESET}  ${BRIGHT_MAGENTA}${BOLD}ZAPPY MODS${RESET}  ${DIM}•${RESET}  ${BRIGHT_WHITE}SERVER INSTALLER${RESET}  ${DIM}v${APP_VERSION}${RESET}      ${BRIGHT_CYAN}${BOLD}│${RESET}"
     echo -e "  ${BRIGHT_CYAN}${BOLD}╰────────────────────────────────────────────────────────────╯${RESET}"
     echo
 }
@@ -381,7 +375,7 @@ create_cloud_init() {
 
     cat > "$user_data" <<EOF
 #cloud-config
-hostname: lapio-vps
+hostname: zappy-vps
 manage_etc_hosts: true
 ssh_pwauth: true
 ssh_deletekeys: false
@@ -418,8 +412,8 @@ runcmd:
 EOF
 
     cat > "$meta_data" <<EOF
-instance-id: lapio-bhai-vps
-local-hostname: lapio-vps
+instance-id: zappy-mods-vps
+local-hostname: zappy-vps
 EOF
 
     run_silent "Generating cloud-init disk" \
@@ -837,6 +831,62 @@ install_cloudflared_any() {
     return 1
 }
 
+cloudflared_systemd_available() {
+    command -v systemctl >/dev/null 2>&1 \
+        && [ -d /run/systemd/system ] \
+        && [ "$(ps -p 1 -o comm= 2>/dev/null || true)" = "systemd" ]
+}
+
+cloudflared_running() {
+    if [ -f "$CF_PID_FILE" ]; then
+        local pid
+        pid="$(cat "$CF_PID_FILE" 2>/dev/null || true)"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1 && return 0
+    return 1
+}
+
+stop_cloudflared_manual() {
+    if [ -f "$CF_PID_FILE" ]; then
+        local pid
+        pid="$(cat "$CF_PID_FILE" 2>/dev/null || true)"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+        rm -f "$CF_PID_FILE"
+    fi
+    pkill -f 'cloudflared.*tunnel.*run' 2>/dev/null || true
+}
+
+start_cloudflared_manual() {
+    local token="$1"
+
+    if cloudflared_running; then
+        status_ok "cloudflared tunnel already running"
+        return 0
+    fi
+
+    nohup cloudflared tunnel run --token "$token" >>"$CF_LOG_FILE" 2>&1 </dev/null &
+    local pid=$!
+    echo "$pid" > "$CF_PID_FILE"
+    sleep 2
+
+    if kill -0 "$pid" 2>/dev/null; then
+        status_ok "cloudflared tunnel running in background (PID ${pid})"
+        echo -e "  ${DIM}Log:${RESET} ${CYAN}${CF_LOG_FILE}${RESET}"
+        return 0
+    fi
+
+    status_fail "cloudflared tunnel failed to start"
+    echo -e "  ${DIM}Check:${RESET} ${CYAN}${CF_LOG_FILE}${RESET}"
+    tail -n 10 "$CF_LOG_FILE" 2>/dev/null | sed 's/^/  /' || true
+    return 1
+}
+
 install_cloudflare_tunnel() {
     header
     section_title ".TOOLS • CLOUDFLARE TUNNEL"
@@ -883,46 +933,51 @@ install_cloudflare_tunnel() {
 
     status_ok "Cloudflare tunnel token received"
     echo -e "  ${DIM}Installing the tunnel service...${RESET}"
+    echo
 
     local cf_error="${LOG_DIR}/cloudflared-install-$$.err"
     rm -f "$cf_error"
-
     local cf_service_ok=0
-    if run_priv cloudflared service install "$tunnel_token" >/dev/null 2>"$cf_error"; then
-        cf_service_ok=1
-    fi
 
-    if [ "$cf_service_ok" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        if systemctl is-active --quiet cloudflared 2>/dev/null; then
+    if cloudflared_systemd_available; then
+        if run_priv cloudflared service install "$tunnel_token" >/dev/null 2>"$cf_error"; then
             cf_service_ok=1
+            status_ok "Cloudflare Tunnel systemd service installed"
         fi
+    else
+        status_warn "systemd is not running (Teradata/Jupyter container)."
+        echo -e "  ${DIM}Using manual background mode instead.${RESET}"
+        echo
     fi
 
     if [ "$cf_service_ok" -eq 0 ]; then
-        status_fail "Cloudflare tunnel service installation failed"
         if [ -s "$cf_error" ]; then
-            echo
-            echo -e "  ${BRIGHT_YELLOW}${BOLD}cloudflared said:${RESET}"
-            sed 's/^[[:space:]]*/  /' "$cf_error" | tail -n 12
+            echo -e "  ${BRIGHT_YELLOW}${BOLD}cloudflared reported:${RESET}"
+            sed 's/^[[:space:]]*/  /' "$cf_error" | tail -n 8
             cat "$cf_error" >> "$LOG_FILE" 2>/dev/null || true
         fi
         rm -f "$cf_error"
 
-        if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
-            echo
-            status_warn "systemd is not running in this container."
-            echo -e "  ${DIM}cloudflared service cannot be registered automatically.${RESET}"
-            echo -e "  ${DIM}You can still run the tunnel manually with:${RESET}"
-            echo -e "  ${CYAN}  cloudflared tunnel run --token \"\$TOKEN\"${RESET}"
+        echo
+        echo -e "  ${BRIGHT_WHITE}${BOLD}Starting cloudflared manually${RESET}"
+        if ! start_cloudflared_manual "$tunnel_token"; then
+            status_fail "Could not start cloudflared tunnel"
+            pause_screen
+            return 1
         fi
 
-        echo -e "  ${DIM}The tunnel token itself was not written to the log.${RESET}"
-        pause_screen
-        return 1
+        cat > "${LOG_DIR}/cloudflared-token" <<EOF
+${tunnel_token}
+EOF
+        chmod 600 "${LOG_DIR}/cloudflared-token"
+    else
+        rm -f "$cf_error"
+        cat > "${LOG_DIR}/cloudflared-token" <<EOF
+${tunnel_token}
+EOF
+        chmod 600 "${LOG_DIR}/cloudflared-token"
     fi
-    rm -f "$cf_error"
 
-    status_ok "Cloudflare Tunnel service installed"
     echo
     echo -e "  ${BRIGHT_GREEN}${BOLD}Add these exactly in Cloudflare Tunnel:${RESET}"
     echo -e "  ${DIM}Type:${RESET} https"
@@ -941,8 +996,95 @@ install_cloudflare_tunnel() {
     echo -e "  ${DIM}Enable TLS:${RESET} yes"
     echo
     status_ok "Cloudflare Tunnel setup is done"
-    echo -e "  ${DIM}You are ready to continue.${RESET}"
+    echo -e "  ${DIM}Token saved to:${RESET} ${CYAN}${LOG_DIR}/cloudflared-token${RESET}"
     pause_screen
+}
+
+cloudflared_control_menu() {
+    while true; do
+        header
+        section_title ".TOOLS • CLOUDFLARED CONTROL"
+
+        local state="STOPPED"
+        local state_color="$BRIGHT_RED"
+        if cloudflared_running; then
+            state="RUNNING"
+            state_color="$BRIGHT_GREEN"
+        fi
+
+        echo -e "  ${DIM}Status:${RESET} ${state_color}${BOLD}${state}${RESET}"
+        echo
+        echo -e "  ${CYAN}01${RESET}  ${WHITE}Start Tunnel${RESET}"
+        echo -e "  ${CYAN}02${RESET}  ${WHITE}Stop Tunnel${RESET}"
+        echo -e "  ${CYAN}03${RESET}  ${WHITE}Restart Tunnel${RESET}"
+        echo -e "  ${CYAN}04${RESET}  ${WHITE}View Tunnel Log${RESET}"
+        echo -e "  ${CYAN}00${RESET}  ${WHITE}Back${RESET}"
+        echo
+
+        read -r -p "  Select › " choice || true
+
+        case "$choice" in
+            1|01)
+                local token_file="${LOG_DIR}/cloudflared-token"
+                if [ ! -f "$token_file" ]; then
+                    status_fail "No token saved. Install tunnel first."
+                    pause_screen
+                    continue
+                fi
+                local token
+                token="$(cat "$token_file")"
+                start_cloudflared_manual "$token" || true
+                pause_screen
+                ;;
+            2|02)
+                stop_cloudflared_manual
+                status_ok "cloudflared stopped"
+                pause_screen
+                ;;
+            3|03)
+                local token_file="${LOG_DIR}/cloudflared-token"
+                if [ ! -f "$token_file" ]; then
+                    status_fail "No token saved. Install tunnel first."
+                    pause_screen
+                    continue
+                fi
+                stop_cloudflared_manual
+                sleep 1
+                local token
+                token="$(cat "$token_file")"
+                start_cloudflared_manual "$token" || true
+                pause_screen
+                ;;
+            4|04)
+                header
+                section_title "CLOUDFLARED LOG"
+                echo -e "  ${DIM}${CF_LOG_FILE}${RESET}"
+                echo
+                tail -n 60 "$CF_LOG_FILE" 2>/dev/null || true
+                pause_screen
+                ;;
+            0|00) return 0 ;;
+            *) status_fail "Invalid selection"; sleep 1 ;;
+        esac
+    done
+}
+
+install_pufferpanel_deps() {
+    run_silent "Installing PufferPanel dependencies" \
+        run_priv apt-get install -y curl gnupg ca-certificates || true
+
+    local missing=()
+    command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v gpg >/dev/null 2>&1 || missing+=("gnupg")
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        status_fail "Required tools missing: ${missing[*]}"
+        echo -e "  ${DIM}Try manually: apt-get install -y ${missing[*]}${RESET}"
+        echo -e "  ${DIM}Log: ${LOG_FILE}${RESET}"
+        return 1
+    fi
+
+    return 0
 }
 
 install_pufferpanel() {
@@ -979,7 +1121,7 @@ install_pufferpanel() {
     echo
 
     run_silent "Updating package index" run_priv apt-get update || { pause_screen; return 1; }
-    run_silent "Installing PufferPanel dependencies" run_priv apt-get install -y curl gnupg apt-transport-https || { pause_screen; return 1; }
+    install_pufferpanel_deps || { pause_screen; return 1; }
 
     run_silent "Creating PufferPanel keyring directory" \
         run_priv mkdir -p /etc/apt/keyrings || { pause_screen; return 1; }
@@ -1129,11 +1271,12 @@ delete_cloudflare_tunnel() {
     echo -e "  ${YELLOW}This removes the existing cloudflared tunnel service.${RESET}"
     echo
 
-    if run_priv cloudflared service uninstall >>"$LOG_FILE" 2>&1; then
-        status_ok "Cloudflare Tunnel service deleted"
-    else
-        status_warn "Cloudflare Tunnel service was not installed or could not be removed"
+    if command -v cloudflared >/dev/null 2>&1; then
+        run_priv cloudflared service uninstall >>"$LOG_FILE" 2>&1 || true
     fi
+    stop_cloudflared_manual
+    rm -f "${LOG_DIR}/cloudflared-token"
+    status_ok "Local cloudflared state cleared"
 
     echo
     echo -e "  ${DIM}If you also want to delete the Cloudflare tunnel itself, enter its name or ID.${RESET}"
@@ -1142,7 +1285,7 @@ delete_cloudflare_tunnel() {
     local tunnel_name
     read -r -p "  Tunnel name/ID [optional]: " tunnel_name || true
 
-    if [ -n "$tunnel_name" ]; then
+    if [ -n "$tunnel_name" ] && command -v cloudflared >/dev/null 2>&1; then
         read -r -p "  Delete tunnel '$tunnel_name' from Cloudflare? [y/N]: " answer || true
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             if cloudflared tunnel delete "$tunnel_name" >>"$LOG_FILE" 2>&1; then
@@ -1172,6 +1315,9 @@ tools_menu() {
         echo
         echo -e "  ${CYAN}03${RESET}  ${WHITE}PufferPanel${RESET}"
         echo -e "      ${DIM}Install PufferPanel on web port 8081${RESET}"
+        echo
+        echo -e "  ${CYAN}04${RESET}  ${WHITE}Cloudflared Control${RESET}"
+        echo -e "      ${DIM}Start, stop or inspect the running tunnel${RESET}"
         echo
         echo -e "  ${CYAN}00${RESET}  ${WHITE}Back${RESET}"
         echo
@@ -1205,6 +1351,7 @@ tools_menu() {
                 done
                 ;;
             3|03) install_pufferpanel || true ;;
+            4|04) cloudflared_control_menu || true ;;
             0|00) return 0 ;;
             *) status_fail "Invalid selection"; sleep 1 ;;
         esac
@@ -1279,7 +1426,7 @@ dashboards_menu() {
         section_title ".DASHBOARDS"
 
         echo -e "  ${CYAN}01${RESET}  ${WHITE}ChunkDash • Feastic Theme${RESET}"
-        echo -e "      ${DIM}Install Lapio's custom hosting dashboard${RESET}"
+        echo -e "      ${DIM}Install Zappy's custom hosting dashboard${RESET}"
         echo
         echo -e "  ${CYAN}02${RESET}  ${DIM}Coming Soon${RESET}"
         echo
@@ -1364,7 +1511,7 @@ main_menu() {
         echo
 
         line
-        echo -e "  ${DIM}LAPIO BHAI${RESET} ${BRIGHT_CYAN}›${RESET} ${DIM}Ready for command${RESET}"
+        echo -e "  ${DIM}ZAPPY MODS${RESET} ${BRIGHT_CYAN}›${RESET} ${DIM}Ready for command${RESET}"
         printf -v MAIN_MENU_PROMPT "  %s%sSelect [00-05] › %s" "$BRIGHT_CYAN" "$BOLD" "$RESET"
         read -r -p "$MAIN_MENU_PROMPT" choice || true
 
@@ -1384,7 +1531,7 @@ main_menu() {
             0|00)
                 clear 2>/dev/null || printf '\033c'
                 echo
-                echo -e "  ${BRIGHT_CYAN}${BOLD}LAPIO BHAI${RESET} ${DIM}installer closed.${RESET}"
+                echo -e "  ${BRIGHT_CYAN}${BOLD}ZAPPY MODS${RESET} ${DIM}installer closed.${RESET}"
                 echo
                 exit 0
                 ;;
