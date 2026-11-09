@@ -24,7 +24,7 @@ BRIGHT_YELLOW=$'\033[93m'
 BRIGHT_MAGENTA=$'\033[95m'
 
 APP_NAME="LAPIO BHAI"
-APP_VERSION="2.5"
+APP_VERSION="2.6"
 LOG_DIR="${HOME}/.lapio-bhai"
 LOG_FILE="${LOG_DIR}/installer.log"
 VPS_DIR="${HOME}/.lapio-bhai/vps"
@@ -33,15 +33,21 @@ VPS_ENV="${VPS_DIR}/.vps_env"
 mkdir -p "$LOG_DIR" "$VPS_DIR"
 touch "$LOG_FILE"
 
-if [ "$(id -u)" -eq 0 ]; then
+if [ "${EUID:-$(id -u 2>/dev/null || echo 1)}" -eq 0 ]; then
     SUDO_CMD=()
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO_CMD=(sudo -E)
 else
-    if command -v sudo >/dev/null 2>&1; then
-        SUDO_CMD=(sudo -E)
-    else
-        SUDO_CMD=()
-    fi
+    SUDO_CMD=()
 fi
+
+run_priv() {
+    if [ "${#SUDO_CMD[@]}" -gt 0 ]; then
+        "${SUDO_CMD[@]}" "$@"
+    else
+        "$@"
+    fi
+}
 
 term_width() {
     local width
@@ -344,8 +350,8 @@ vps_image_in_use() {
 }
 
 install_vps_dependencies() {
-    run_silent "Updating package index" "${SUDO_CMD[@]}" apt-get update || return 1
-    run_silent "Installing VPS packages" "${SUDO_CMD[@]}" apt-get install -y \
+    run_silent "Updating package index" run_priv apt-get update || return 1
+    run_silent "Installing VPS packages" run_priv apt-get install -y \
         qemu-system-x86 qemu-utils wget cloud-image-utils curl lsof ca-certificates \
         || return 1
 }
@@ -357,15 +363,15 @@ download_vps_image() {
         status_ok "Ubuntu 22.04 image cache found"
     else
         run_silent "Downloading Ubuntu 22.04 image" \
-            "${SUDO_CMD[@]}" wget -q \
+            run_priv wget -q \
             "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img" \
             -O "$VPS_IMAGE" || return 1
     fi
 
     run_silent "Expanding VPS disk" \
-        "${SUDO_CMD[@]}" qemu-img resize "$VPS_IMAGE" "${DISK_GB}G" || return 1
+        run_priv qemu-img resize "$VPS_IMAGE" "${DISK_GB}G" || return 1
 
-    "${SUDO_CMD[@]}" chmod 666 "$VPS_IMAGE" 2>/dev/null || true
+    run_priv chmod 666 "$VPS_IMAGE" 2>/dev/null || true
 }
 
 create_cloud_init() {
@@ -504,7 +510,7 @@ start_vps() {
     echo
 
     set +e
-    "${SUDO_CMD[@]}" qemu-system-x86_64 \
+    run_priv qemu-system-x86_64 \
         "${accel_args[@]}" \
         "${cpu_args[@]}" \
         -m "${RAM_GB}G" \
@@ -538,23 +544,23 @@ create_vps() {
 
     load_vps_env
 
-    read -r -p "  RAM in GB [${RAM_GB}]: " value
+    read -r -p "  RAM in GB [${RAM_GB}]: " value || true
     RAM_GB="${value:-$RAM_GB}"
 
-    read -r -p "  CPU cores [${CPU_CORES}]: " value
+    read -r -p "  CPU cores [${CPU_CORES}]: " value || true
     CPU_CORES="${value:-$CPU_CORES}"
 
-    read -r -p "  Disk in GB [${DISK_GB}]: " value
+    read -r -p "  Disk in GB [${DISK_GB}]: " value || true
     DISK_GB="${value:-$DISK_GB}"
 
-    read -r -p "  Username [${USER_NAME}]: " value
+    read -r -p "  Username [${USER_NAME}]: " value || true
     USER_NAME="${value:-$USER_NAME}"
 
-    read -r -s -p "  Password [hidden]: " value
+    read -r -s -p "  Password [hidden]: " value || true
     echo
     USER_PASS="${value:-$USER_PASS}"
 
-    read -r -p "  Host SSH port [${TCP_HOST_PORT}]: " value
+    read -r -p "  Host SSH port [${TCP_HOST_PORT}]: " value || true
     TCP_HOST_PORT="${value:-$TCP_HOST_PORT}"
 
     save_vps_env
@@ -617,7 +623,7 @@ configure_network() {
 
     echo -e "  ${DIM}Current:${RESET} ${CYAN}localhost:${TCP_HOST_PORT} -> VM:${TCP_GUEST_PORT}${RESET}"
     echo
-    read -r -p "  New host SSH port [${TCP_HOST_PORT}]: " value
+    read -r -p "  New host SSH port [${TCP_HOST_PORT}]: " value || true
     TCP_HOST_PORT="${value:-$TCP_HOST_PORT}"
     save_vps_env
     echo
@@ -630,7 +636,7 @@ clean_vps() {
     section_title "CLEAN VPS"
     echo -e "  ${YELLOW}This removes the saved VPS disk, cloud-init and configuration.${RESET}"
     echo
-    read -r -p "  Continue? [y/N]: " answer
+    read -r -p "  Continue? [y/N]: " answer || true
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
 
     run_silent "Removing VPS files" rm -rf "$VPS_DIR" || { mkdir -p "$VPS_DIR"; pause_screen; return 1; }
@@ -689,7 +695,7 @@ install_pterodactyl() {
     echo -e "  ${DIM}Installer output is logged to:${RESET} ${CYAN}${LOG_FILE}${RESET}"
     echo
 
-    read -r -p "  Continue? [y/N]: " answer
+    read -r -p "  Continue? [y/N]: " answer || true
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
 
     echo
@@ -707,30 +713,128 @@ install_playit() {
     header
     section_title ".TOOLS • PLAYIT"
 
-    run_silent "Updating package index" "${SUDO_CMD[@]}" apt-get update -y || { pause_screen; return 1; }
-    run_silent "Installing Playit dependencies" "${SUDO_CMD[@]}" apt-get install -y curl gnupg ca-certificates || { pause_screen; return 1; }
+    run_silent "Updating package index" run_priv apt-get update -y || { pause_screen; return 1; }
+    run_silent "Installing Playit dependencies" run_priv apt-get install -y curl gnupg ca-certificates || { pause_screen; return 1; }
 
     local keyring="/etc/apt/trusted.gpg.d/playit.gpg"
     local repo="/etc/apt/sources.list.d/playit-cloud.list"
 
-    if [ "${#SUDO_CMD[@]}" -gt 0 ]; then
-        curl -fsSL https://playit-cloud.github.io/ppa/key.gpg \
-            | "${SUDO_CMD[@]}" gpg --dearmor --yes -o "$keyring" >>"$LOG_FILE" 2>&1
-        echo "deb [signed-by=${keyring}] https://playit-cloud.github.io/ppa/data ./" \
-            | "${SUDO_CMD[@]}" tee "$repo" >/dev/null
+    if curl -fsSL --max-time 30 https://playit-cloud.github.io/ppa/key.gpg 2>>"$LOG_FILE" | run_priv gpg --dearmor --yes -o "$keyring" >>"$LOG_FILE" 2>&1; then
+        echo "deb [signed-by=${keyring}] https://playit-cloud.github.io/ppa/data ./" | run_priv tee "$repo" >/dev/null
     else
-        curl -fsSL https://playit-cloud.github.io/ppa/key.gpg \
-            | gpg --dearmor --yes -o "$keyring" >>"$LOG_FILE" 2>&1
-        echo "deb [signed-by=${keyring}] https://playit-cloud.github.io/ppa/data ./" \
-            | tee "$repo" >/dev/null
+        status_fail "Failed to add Playit GPG key"
+        pause_screen
+        return 1
     fi
 
-    run_silent "Refreshing Playit repository" "${SUDO_CMD[@]}" apt-get update -y || { pause_screen; return 1; }
-    run_silent "Installing Playit" "${SUDO_CMD[@]}" apt-get install -y playit || { pause_screen; return 1; }
+    run_silent "Refreshing Playit repository" run_priv apt-get update -y || { pause_screen; return 1; }
+    run_silent "Installing Playit" run_priv apt-get install -y playit || { pause_screen; return 1; }
 
     status_ok "Playit installed successfully"
     echo -e "  ${DIM}Run Playit from your server when you are ready to authenticate it.${RESET}"
     pause_screen
+}
+
+install_cloudflared_binary() {
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    local bin_path="/usr/local/bin/cloudflared"
+
+    if ! run_silent "Downloading cloudflared binary" \
+        curl -fsSL --max-time 120 \
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
+        -o "${tmp_dir}/cloudflared"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! run_silent "Installing cloudflared binary" \
+        run_priv install -m 0755 "${tmp_dir}/cloudflared" "$bin_path"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+install_cloudflared_deb() {
+    local deb_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+    local deb_file="/tmp/cloudflared-$$.deb"
+    rm -f "$deb_file"
+
+    if ! run_silent "Downloading cloudflared .deb" \
+        curl -fsSL --max-time 120 "$deb_url" -o "$deb_file"; then
+        rm -f "$deb_file"
+        return 1
+    fi
+
+    if ! run_silent "Installing cloudflared .deb" \
+        run_priv dpkg -i "$deb_file"; then
+        run_priv apt-get install -f -y >/dev/null 2>&1 || true
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            rm -f "$deb_file"
+            return 1
+        fi
+    fi
+
+    rm -f "$deb_file"
+    return 0
+}
+
+install_cloudflared_apt() {
+    if ! run_silent "Adding Cloudflare GPG key directory" \
+        run_priv mkdir -p --mode=0755 /usr/share/keyrings; then
+        return 1
+    fi
+
+    if ! curl -fsSL --max-time 30 https://pkg.cloudflare.com/cloudflare-public-v2.gpg \
+        | run_priv tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null 2>>"$LOG_FILE"; then
+        return 1
+    fi
+
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' \
+        | run_priv tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+
+    if ! run_silent "Updating package index" run_priv apt-get update; then
+        return 1
+    fi
+
+    if ! run_silent "Installing cloudflared via apt" run_priv apt-get install -y cloudflared; then
+        return 1
+    fi
+
+    return 0
+}
+
+install_cloudflared_any() {
+    if command -v cloudflared >/dev/null 2>&1; then
+        status_ok "cloudflared already installed"
+        return 0
+    fi
+
+    if install_cloudflared_apt; then
+        status_ok "cloudflared installed via apt"
+        return 0
+    fi
+
+    status_warn "APT method failed. Trying direct .deb from GitHub..."
+    if install_cloudflared_deb; then
+        status_ok "cloudflared installed via .deb"
+        return 0
+    fi
+
+    status_warn "DEB method failed. Trying standalone binary..."
+    if install_cloudflared_binary; then
+        status_ok "cloudflared installed as standalone binary"
+        return 0
+    fi
+
+    status_fail "Could not install cloudflared by any method"
+    echo -e "  ${DIM}Network may be blocking GitHub and Cloudflare. Check:${RESET}"
+    echo -e "  ${DIM}  curl -I https://github.com${RESET}"
+    echo -e "  ${DIM}  curl -I https://pkg.cloudflare.com${RESET}"
+    return 1
 }
 
 install_cloudflare_tunnel() {
@@ -741,26 +845,7 @@ install_cloudflare_tunnel() {
     echo -e "  ${DIM}Installing cloudflared and registering the tunnel as a service.${RESET}"
     echo
 
-    run_silent "Adding Cloudflare GPG key directory" \
-        "${SUDO_CMD[@]}" mkdir -p --mode=0755 /usr/share/keyrings \
-        || { pause_screen; return 1; }
-
-    if ! curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg \
-        | "${SUDO_CMD[@]}" tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null 2>>"$LOG_FILE"; then
-        status_fail "Failed to add Cloudflare GPG key"
-        pause_screen
-        return 1
-    fi
-    status_ok "Cloudflare GPG key added"
-
-    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' \
-        | "${SUDO_CMD[@]}" tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
-
-    run_silent "Updating package index" "${SUDO_CMD[@]}" apt-get update \
-        || { pause_screen; return 1; }
-
-    run_silent "Installing cloudflared" "${SUDO_CMD[@]}" apt-get install -y cloudflared \
-        || { pause_screen; return 1; }
+    install_cloudflared_any || { pause_screen; return 1; }
 
     echo
     echo -e "  ${BRIGHT_WHITE}${BOLD}Cloudflare Tunnel Token${RESET}"
@@ -801,15 +886,36 @@ install_cloudflare_tunnel() {
 
     local cf_error="${LOG_DIR}/cloudflared-install-$$.err"
     rm -f "$cf_error"
-    if ! "${SUDO_CMD[@]}" cloudflared service install "$tunnel_token" >"/dev/null" 2>"$cf_error"; then
+
+    local cf_service_ok=0
+    if run_priv cloudflared service install "$tunnel_token" >/dev/null 2>"$cf_error"; then
+        cf_service_ok=1
+    fi
+
+    if [ "$cf_service_ok" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        if systemctl is-active --quiet cloudflared 2>/dev/null; then
+            cf_service_ok=1
+        fi
+    fi
+
+    if [ "$cf_service_ok" -eq 0 ]; then
         status_fail "Cloudflare tunnel service installation failed"
         if [ -s "$cf_error" ]; then
             echo
-            echo -e "  ${BRIGHT_YELLOW}${BOLD}cloudflared:${RESET}"
+            echo -e "  ${BRIGHT_YELLOW}${BOLD}cloudflared said:${RESET}"
             sed 's/^[[:space:]]*/  /' "$cf_error" | tail -n 12
             cat "$cf_error" >> "$LOG_FILE" 2>/dev/null || true
         fi
         rm -f "$cf_error"
+
+        if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+            echo
+            status_warn "systemd is not running in this container."
+            echo -e "  ${DIM}cloudflared service cannot be registered automatically.${RESET}"
+            echo -e "  ${DIM}You can still run the tunnel manually with:${RESET}"
+            echo -e "  ${CYAN}  cloudflared tunnel run --token \"\$TOKEN\"${RESET}"
+        fi
+
         echo -e "  ${DIM}The tunnel token itself was not written to the log.${RESET}"
         pause_screen
         return 1
@@ -818,7 +924,7 @@ install_cloudflare_tunnel() {
 
     status_ok "Cloudflare Tunnel service installed"
     echo
-    echo -e "  ${BRIGHT_GREEN}${BOLD}Add these exactly in routine in Cloudflare Tunnel:${RESET}"
+    echo -e "  ${BRIGHT_GREEN}${BOLD}Add these exactly in Cloudflare Tunnel:${RESET}"
     echo -e "  ${DIM}Type:${RESET} https"
     echo -e "  ${DIM}URL:${RESET} localhost:8443"
     echo -e "  ${DIM}Enable TLS:${RESET} yes"
@@ -829,7 +935,7 @@ install_cloudflare_tunnel() {
     echo -e "  ${DIM}assume SSL:${RESET} y"
     echo -e "  ${DIM}HTTPS request:${RESET} n"
     echo
-    echo -e "  ${WHITE}For Wings, in routine Cloudflare:${RESET}"
+    echo -e "  ${WHITE}For Wings, in Cloudflare:${RESET}"
     echo -e "  ${DIM}Type:${RESET} https"
     echo -e "  ${DIM}URL:${RESET} localhost"
     echo -e "  ${DIM}Enable TLS:${RESET} yes"
@@ -872,25 +978,25 @@ install_pufferpanel() {
     echo -e "  ${BRIGHT_WHITE}${BOLD}Installing PufferPanel${RESET}"
     echo
 
-    run_silent "Updating package index" "${SUDO_CMD[@]}" apt-get update || { pause_screen; return 1; }
-    run_silent "Installing PufferPanel dependencies" "${SUDO_CMD[@]}" apt-get install -y curl gnupg apt-transport-https || { pause_screen; return 1; }
+    run_silent "Updating package index" run_priv apt-get update || { pause_screen; return 1; }
+    run_silent "Installing PufferPanel dependencies" run_priv apt-get install -y curl gnupg apt-transport-https || { pause_screen; return 1; }
 
     run_silent "Creating PufferPanel keyring directory" \
-        "${SUDO_CMD[@]}" mkdir -p /etc/apt/keyrings || { pause_screen; return 1; }
+        run_priv mkdir -p /etc/apt/keyrings || { pause_screen; return 1; }
 
     local puffer_key="/etc/apt/keyrings/pufferpanel.gpg"
     local puffer_repo="/etc/apt/sources.list.d/pufferpanel.sources"
 
-    if ! curl -fsSL https://packagecloud.io/pufferpanel/pufferpanel/gpgkey \
-        | "${SUDO_CMD[@]}" gpg --dearmor --yes \
-            | "${SUDO_CMD[@]}" tee "$puffer_key" >/dev/null 2>>"$LOG_FILE"; then
+    if ! curl -fsSL --max-time 30 https://packagecloud.io/pufferpanel/pufferpanel/gpgkey \
+        | run_priv gpg --dearmor --yes \
+            | run_priv tee "$puffer_key" >/dev/null 2>>"$LOG_FILE"; then
         status_fail "Failed to add PufferPanel GPG key"
         pause_screen
         return 1
     fi
     status_ok "PufferPanel GPG key added"
 
-    cat <<'EOF' | "${SUDO_CMD[@]}" tee "$puffer_repo" >/dev/null
+    cat <<'EOF' | run_priv tee "$puffer_repo" >/dev/null
 X-Repolib-Name: PufferPanel
 Types: deb
 URIs: https://packagecloud.io/pufferpanel/pufferpanel/any/
@@ -901,12 +1007,12 @@ EOF
 
     status_ok "PufferPanel repository added"
 
-    run_silent "Refreshing PufferPanel repository" "${SUDO_CMD[@]}" apt-get update || { pause_screen; return 1; }
-    run_silent "Installing PufferPanel" "${SUDO_CMD[@]}" apt-get install -y pufferpanel || { pause_screen; return 1; }
+    run_silent "Refreshing PufferPanel repository" run_priv apt-get update || { pause_screen; return 1; }
+    run_silent "Installing PufferPanel" run_priv apt-get install -y pufferpanel || { pause_screen; return 1; }
 
     local puffer_config="/etc/pufferpanel/config.json"
-    if "${SUDO_CMD[@]}" test -f "$puffer_config"; then
-        if "${SUDO_CMD[@]}" sed -i \
+    if run_priv test -f "$puffer_config"; then
+        if run_priv sed -i \
             's/"host"[[:space:]]*:[[:space:]]*"0\.0\.0\.0:8080"/"host": "0.0.0.0:8081"/' \
             "$puffer_config"; then
             status_ok "PufferPanel web port set to 8081"
@@ -927,31 +1033,45 @@ EOF
     fi
 
     if [ "$puffer_systemd" -eq 1 ]; then
-        run_silent "Reloading systemd" "${SUDO_CMD[@]}" systemctl daemon-reload || { pause_screen; return 1; }
-        run_silent "Enabling PufferPanel service" "${SUDO_CMD[@]}" systemctl enable pufferpanel || { pause_screen; return 1; }
-        run_silent "Starting PufferPanel service" "${SUDO_CMD[@]}" systemctl restart pufferpanel || { pause_screen; return 1; }
+        run_silent "Reloading systemd" run_priv systemctl daemon-reload || { pause_screen; return 1; }
+        run_silent "Enabling PufferPanel service" run_priv systemctl enable pufferpanel || { pause_screen; return 1; }
+        run_silent "Starting PufferPanel service" run_priv systemctl restart pufferpanel || { pause_screen; return 1; }
         status_ok "PufferPanel service is running"
     else
         status_warn "systemd is not available; using PufferPanel runService mode"
 
         local puffer_pid_file="/run/pufferpanel.pid"
-        if [ -f "$puffer_pid_file" ]; then
+        if run_priv test -f "$puffer_pid_file"; then
             local old_pid
-            old_pid="$(cat "$puffer_pid_file" 2>/dev/null || true)"
+            old_pid="$(run_priv cat "$puffer_pid_file" 2>/dev/null || true)"
             if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
-                "${SUDO_CMD[@]}" kill "$old_pid" 2>/dev/null || true
+                run_priv kill "$old_pid" 2>/dev/null || true
                 sleep 1
             fi
-            "${SUDO_CMD[@]}" rm -f "$puffer_pid_file" 2>/dev/null || true
+            run_priv rm -f "$puffer_pid_file" 2>/dev/null || true
         fi
 
         local puffer_log="/var/log/pufferpanel.log"
-        "${SUDO_CMD[@]}" bash -c \
-            'nohup /usr/sbin/pufferpanel runService >>/var/log/pufferpanel.log 2>&1 </dev/null & echo $! >/run/pufferpanel.pid'
+        local puffer_bin=""
+        for candidate in /usr/sbin/pufferpanel /usr/bin/pufferpanel /usr/local/bin/pufferpanel; do
+            if [ -x "$candidate" ]; then
+                puffer_bin="$candidate"
+                break
+            fi
+        done
+
+        if [ -z "$puffer_bin" ]; then
+            status_fail "PufferPanel binary not found after install"
+            pause_screen
+            return 1
+        fi
+
+        run_priv bash -c \
+            "nohup '${puffer_bin}' runService >>'${puffer_log}' 2>&1 </dev/null & echo \$! >'${puffer_pid_file}'"
         sleep 2
 
         local puffer_pid
-        puffer_pid="$("${SUDO_CMD[@]}" cat "$puffer_pid_file" 2>/dev/null || true)"
+        puffer_pid="$(run_priv cat "$puffer_pid_file" 2>/dev/null || true)"
         if [[ "$puffer_pid" =~ ^[0-9]+$ ]] && kill -0 "$puffer_pid" 2>/dev/null; then
             status_ok "PufferPanel started with runService"
             echo -e "  ${DIM}Runtime log:${RESET} ${CYAN}${puffer_log}${RESET}"
@@ -969,13 +1089,27 @@ EOF
     echo -e "  ${DIM}Make sure to answer Y when it asks whether the user is an admin.${RESET}"
     echo
 
-    if "${SUDO_CMD[@]}" pufferpanel user add; then
+    local puffer_cmd=""
+    for candidate in pufferpanel /usr/sbin/pufferpanel /usr/bin/pufferpanel /usr/local/bin/pufferpanel; do
+        if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+            puffer_cmd="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$puffer_cmd" ]; then
+        status_fail "pufferpanel command not found"
+        pause_screen
+        return 1
+    fi
+
+    if run_priv "$puffer_cmd" user add; then
         echo
         status_ok "PufferPanel user created"
     else
         echo
         status_fail "PufferPanel user creation failed or was cancelled"
-        echo -e "  ${DIM}You can retry later with: sudo pufferpanel user add${RESET}"
+        echo -e "  ${DIM}You can retry later with: pufferpanel user add${RESET}"
         pause_screen
         return 1
     fi
@@ -995,7 +1129,7 @@ delete_cloudflare_tunnel() {
     echo -e "  ${YELLOW}This removes the existing cloudflared tunnel service.${RESET}"
     echo
 
-    if "${SUDO_CMD[@]}" cloudflared service uninstall >>"$LOG_FILE" 2>&1; then
+    if run_priv cloudflared service uninstall >>"$LOG_FILE" 2>&1; then
         status_ok "Cloudflare Tunnel service deleted"
     else
         status_warn "Cloudflare Tunnel service was not installed or could not be removed"
